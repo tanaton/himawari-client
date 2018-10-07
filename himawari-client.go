@@ -14,11 +14,15 @@ import (
 	"runtime"
 	"strconv"
 	"time"
+
+	log "github.com/sirupsen/logrus"
 )
 
 const (
-	ENCODING_NAME   = "himawari-tmp.mp4"
-	COMMAND_TIMEOUT = 24 * time.Hour
+	ENCODING_NAME     = "himawari-tmp.mp4"
+	COMMAND_TIMEOUT   = 24 * time.Hour
+	LOOP_WAIT_DEFAULT = time.Second
+	LOOP_WAIT_MAX     = 1000 * time.Second
 )
 
 type Task struct {
@@ -34,6 +38,9 @@ type Task struct {
 var NumCPU int
 
 func init() {
+	log.SetFormatter(&log.TextFormatter{})
+	log.SetLevel(log.InfoLevel)
+
 	n := runtime.NumCPU()
 	NumCPU = (n / 4) * 3
 	if NumCPU <= 0 {
@@ -43,59 +50,85 @@ func init() {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("引数に接続先IPを指定してね")
+		log.WithFields(log.Fields{
+			"len": len(os.Args),
+		}).Warn("引数に接続先IPを指定してね")
 		os.Exit(1)
 	}
 	host := os.Args[1]
+
+	wait := LOOP_WAIT_DEFAULT
 	for {
-		time.Sleep(time.Second)
-		t := getTask(host)
-		if t == nil {
-			continue
-		}
-		t.preset()
-		// エンコード後ファイルが存在しないのでエンコードする
-		err := t.ffmpeg(ENCODING_NAME)
+		time.Sleep(wait)
+		t, err := getTask(host)
 		if err != nil {
-			fmt.Println(err)
+			log.WithError(err).Info("お仕事が取得できませんでした")
+			wait *= 2
+			if wait > LOOP_WAIT_MAX {
+				wait = LOOP_WAIT_MAX
+			}
 			continue
 		}
+		log.WithFields(log.Fields{
+			"Id":         t.Id,
+			"Size":       t.Size,
+			"Name":       t.Name,
+			"PresetName": t.PresetName,
+			"PresetData": t.PresetData,
+			"Command":    t.Command,
+			"Args":       t.Args,
+		}).Info("お仕事取得成功")
+		err = t.preset()
+		if err != nil {
+			log.WithError(err).Warn("presetの生成に失敗")
+			continue
+		}
+		// エンコード後ファイルが存在しないのでエンコードする
+		err = t.ffmpeg(ENCODING_NAME)
+		if err != nil {
+			log.WithError(err).Warn("ffmpegの実行に失敗")
+			continue
+		}
+		log.WithFields(log.Fields{
+			"Id":   t.Id,
+			"Name": t.Name,
+		}).Info("エンコード成功")
 		err = t.postVideo(host)
 		if err != nil {
-			fmt.Println(err)
+			log.WithError(err).Warn("エンコード後ビデオの転送に失敗")
 			continue
 		}
+		log.WithFields(log.Fields{
+			"Id":   t.Id,
+			"Name": t.Name,
+		}).Info("お仕事完了")
+		wait = LOOP_WAIT_DEFAULT
 	}
 }
 
-func getTask(host string) *Task {
+func getTask(host string) (*Task, error) {
 	req, err := http.NewRequest("GET", "http://"+host+"/task", nil)
 	if err != nil {
-		fmt.Println(err)
-		return nil
+		return nil, err
 	}
 	req.Header.Set("X-Himawari-Threads", strconv.FormatInt(int64(NumCPU), 10))
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		fmt.Println(err)
-		return nil
+		return nil, err
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		fmt.Println("仕事が無いみたい")
-		return nil
+		return nil, errors.New("仕事が無いみたい")
 	}
 	var t Task
 	encerr := json.NewDecoder(res.Body).Decode(&t)
 	if encerr != nil {
-		fmt.Println(encerr)
-		return nil
+		return nil, encerr
 	}
 	if t.Id == "" {
-		fmt.Println("UUIDが空になってるよ")
-		return nil
+		return nil, errors.New("UUIDが空になってるよ")
 	}
-	return &t
+	return &t, nil
 }
 
 func (t *Task) postVideo(host string) error {
@@ -161,13 +194,20 @@ func (t *Task) postVideo(host string) error {
 	return nil
 }
 
-func (t *Task) preset() {
+func (t *Task) preset() error {
 	wfp, err := os.Create(t.PresetName)
 	if err != nil {
-		panic(err)
+		return err
 	}
 	defer wfp.Close()
-	wfp.WriteString(t.PresetData)
+	n, err := wfp.WriteString(t.PresetData)
+	if err != nil {
+		return err
+	}
+	if n != len(t.PresetData) {
+		return errors.New("プリセットデータサイズがおかしい")
+	}
+	return nil
 }
 
 func (t *Task) ffmpeg(outpath string) error {
