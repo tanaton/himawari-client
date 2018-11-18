@@ -41,9 +41,8 @@ func init() {
 	log.SetFormatter(&log.TextFormatter{})
 	log.SetLevel(log.InfoLevel)
 
-	n := runtime.NumCPU()
-	NumCPU = (n / 4) * 3
-	if NumCPU <= 0 {
+	NumCPU = runtime.NumCPU()
+	if NumCPU <= 1 {
 		NumCPU = 2
 	}
 }
