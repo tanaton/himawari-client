@@ -11,8 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"runtime"
-	"strconv"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -35,16 +33,9 @@ type Task struct {
 	Args       []string
 }
 
-var NumCPU int
-
 func init() {
 	log.SetFormatter(&log.TextFormatter{})
 	log.SetLevel(log.InfoLevel)
-
-	NumCPU = (runtime.NumCPU() / 4) * 3
-	if NumCPU <= 1 {
-		NumCPU = 2
-	}
 }
 
 func main() {
@@ -110,7 +101,7 @@ func getTask(host string) (*Task, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("X-Himawari-Threads", strconv.FormatInt(int64(NumCPU), 10))
+	req.Header.Set("X-Himawari-Threads", "0")
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
