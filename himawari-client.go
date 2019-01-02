@@ -11,16 +11,18 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"time"
 
 	log "github.com/sirupsen/logrus"
 )
 
 const (
-	ENCODING_NAME     = "himawari-tmp.mp4"
-	COMMAND_TIMEOUT   = 24 * time.Hour
-	LOOP_WAIT_DEFAULT = time.Second
-	LOOP_WAIT_MAX     = 1000 * time.Second
+	ENCODING_EXT           = ".mp4"
+	ENCODING_PARALLEL_CORE = 8
+	COMMAND_TIMEOUT        = 24 * time.Hour
+	LOOP_WAIT_DEFAULT      = time.Second
+	LOOP_WAIT_MAX          = 1000 * time.Second
 )
 
 type Task struct {
@@ -47,9 +49,18 @@ func main() {
 	}
 	host := os.Args[1]
 
+	// エンコード並列数を決定
+	parallel := runtime.NumCPU() / ENCODING_PARALLEL_CORE
+	if parallel <= 0 {
+		parallel = 1
+	}
+	sy := make(chan struct{}, parallel)
+
 	wait := LOOP_WAIT_DEFAULT
 	for {
 		time.Sleep(wait)
+
+		// お仕事を取得する
 		t, err := getTask(host)
 		if err != nil {
 			log.WithError(err).Info("お仕事が取得できませんでした")
@@ -68,30 +79,16 @@ func main() {
 			"Command":    t.Command,
 			"Args":       t.Args,
 		}).Info("お仕事取得成功")
-		err = t.preset()
-		if err != nil {
-			log.WithError(err).Warn("presetの生成に失敗")
-			continue
-		}
-		// エンコード後ファイルが存在しないのでエンコードする
-		err = t.ffmpeg(ENCODING_NAME)
-		if err != nil {
-			log.WithError(err).Warn("ffmpegの実行に失敗")
-			continue
-		}
-		log.WithFields(log.Fields{
-			"Id":   t.Id,
-			"Name": t.Name,
-		}).Info("エンコード成功")
-		err = t.postVideo(host)
-		if err != nil {
-			log.WithError(err).Warn("エンコード後ビデオの転送に失敗")
-			continue
-		}
-		log.WithFields(log.Fields{
-			"Id":   t.Id,
-			"Name": t.Name,
-		}).Info("お仕事完了")
+
+		// 並列数を制限
+		sy <- struct{}{}
+
+		go func(t *Task) {
+			defer func() {
+				<-sy
+			}()
+			t.procTask(host)
+		}(t)
 		wait = LOOP_WAIT_DEFAULT
 	}
 }
@@ -121,7 +118,44 @@ func getTask(host string) (*Task, error) {
 	return &t, nil
 }
 
-func (t *Task) postVideo(host string) error {
+func (t *Task) procTask(host string) {
+	// プリセットファイルの生成
+	err := t.preset()
+	if err != nil {
+		log.WithError(err).Warn("presetの生成に失敗")
+		return
+	}
+	// 作業が終わったらプリセットを消す
+	defer os.Remove(t.PresetName)
+
+	ename := t.Id + ENCODING_EXT
+	// エンコード実行
+	err = t.ffmpeg(ename)
+	if err != nil {
+		log.WithError(err).Warn("ffmpegの実行に失敗")
+		return
+	}
+	// 作業が終わったらエンコード済みファイルを消す
+	defer os.Remove(ename)
+	log.WithFields(log.Fields{
+		"Id":   t.Id,
+		"Name": t.Name,
+	}).Info("エンコード成功")
+
+	// エンコード後ビデオの転送
+	err = t.postVideo(host, ename)
+	if err != nil {
+		log.WithError(err).Warn("エンコード後ビデオの転送に失敗")
+		return
+	}
+	log.WithFields(log.Fields{
+		"Id":   t.Id,
+		"Name": t.Name,
+	}).Info("お仕事完了")
+	return
+}
+
+func (t *Task) postVideo(host, ename string) error {
 	tmpfile, err := ioutil.TempFile("", "videodata-")
 	if err != nil {
 		return err
@@ -140,11 +174,11 @@ func (t *Task) postVideo(host string) error {
 		}
 	}
 	{
-		fw, ferr = w.CreateFormFile("videodata", ENCODING_NAME)
+		fw, ferr = w.CreateFormFile("videodata", ename)
 		if ferr != nil {
 			return ferr
 		}
-		rfp, err := os.Open(ENCODING_NAME)
+		rfp, err := os.Open(ename)
 		if err != nil {
 			return err
 		}
@@ -189,13 +223,11 @@ func (t *Task) preset() error {
 	if err != nil {
 		return err
 	}
-	defer wfp.Close()
-	n, err := wfp.WriteString(t.PresetData)
+	_, err = wfp.WriteString(t.PresetData)
+	wfp.Close()
 	if err != nil {
+		os.Remove(t.PresetName)
 		return err
-	}
-	if n != len(t.PresetData) {
-		return errors.New("プリセットデータサイズがおかしい")
 	}
 	return nil
 }
@@ -210,8 +242,8 @@ func (t *Task) ffmpeg(outpath string) error {
 	copy(args, t.Args)
 	args = append(args, outpath)
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	//cmd.Stdout = os.Stdout
+	//cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
