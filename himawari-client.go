@@ -14,7 +14,7 @@ import (
 	"runtime"
 	"time"
 
-	log "github.com/sirupsen/logrus"
+	"go.uber.org/zap"
 )
 
 const (
@@ -35,16 +35,19 @@ type Task struct {
 	Args       []string
 }
 
+var log *zap.SugaredLogger
+
 func init() {
-	log.SetFormatter(&log.TextFormatter{})
-	log.SetLevel(log.InfoLevel)
+	logger, err := zap.NewProduction()
+	if err != nil {
+		panic(err)
+	}
+	log = logger.Sugar()
 }
 
 func main() {
 	if len(os.Args) < 2 {
-		log.WithFields(log.Fields{
-			"len": len(os.Args),
-		}).Warn("引数に接続先IPを指定してね")
+		log.Warnw("引数に接続先IPを指定してね", "len", len(os.Args))
 		os.Exit(1)
 	}
 	host := os.Args[1]
@@ -54,42 +57,47 @@ func main() {
 	if parallel <= 0 {
 		parallel = 1
 	}
-	sy := make(chan struct{}, parallel)
+	syncc := make(chan struct{}, parallel)
+	waitc := make(chan time.Duration)
 
 	wait := LOOP_WAIT_DEFAULT
 	for {
-		time.Sleep(wait)
-
-		// お仕事を取得する
-		t, err := getTask(host)
-		if err != nil {
-			log.WithError(err).Info("お仕事が取得できませんでした")
-			wait *= 2
-			if wait > LOOP_WAIT_MAX {
-				wait = LOOP_WAIT_MAX
-			}
-			continue
-		}
-		log.WithFields(log.Fields{
-			"Id":         t.Id,
-			"Size":       t.Size,
-			"Name":       t.Name,
-			"PresetName": t.PresetName,
-			"PresetData": t.PresetData,
-			"Command":    t.Command,
-			"Args":       t.Args,
-		}).Info("お仕事取得成功")
-
-		// 並列数を制限
-		sy <- struct{}{}
-
-		go func(t *Task) {
-			defer func() {
-				<-sy
+		select {
+		case syncc <- struct{}{}: // 並列数を制限
+			// お仕事確認→開始
+			go func() {
+				defer func() {
+					<-syncc
+				}()
+				// お仕事を取得する
+				t, err := getTask(host)
+				if err != nil {
+					log.Infow("お仕事が取得できませんでした", "error", err)
+					return
+				}
+				log.Infow("お仕事取得成功",
+					"Id", t.Id,
+					"Size", t.Size,
+					"Name", t.Name,
+					"PresetName", t.PresetName,
+					"PresetData", t.PresetData,
+					"Command", t.Command,
+					"Args", t.Args,
+				)
+				// 待ち時間初期化
+				waitc <- LOOP_WAIT_DEFAULT
+				// お仕事開始
+				t.procTask(host)
 			}()
-			t.procTask(host)
-		}(t)
-		wait = LOOP_WAIT_DEFAULT
+		case wait = <-waitc:
+		}
+
+		// 待ち時間
+		time.Sleep(wait)
+		wait *= 2
+		if wait > LOOP_WAIT_MAX {
+			wait = LOOP_WAIT_MAX
+		}
 	}
 }
 
@@ -122,7 +130,7 @@ func (t *Task) procTask(host string) {
 	// プリセットファイルの生成
 	err := t.preset()
 	if err != nil {
-		log.WithError(err).Warn("presetの生成に失敗")
+		log.Warnw("presetの生成に失敗", "error", err)
 		return
 	}
 	// 作業が終わったらプリセットを消す
@@ -132,26 +140,23 @@ func (t *Task) procTask(host string) {
 	// エンコード実行
 	err = t.ffmpeg(ename)
 	if err != nil {
-		log.WithError(err).Warn("ffmpegの実行に失敗")
+		log.Warnw("ffmpegの実行に失敗", "error", err)
 		return
 	}
 	// 作業が終わったらエンコード済みファイルを消す
 	defer os.Remove(ename)
-	log.WithFields(log.Fields{
-		"Id":   t.Id,
-		"Name": t.Name,
-	}).Info("エンコード成功")
+	log.Infow("エンコード成功",
+		"Id", t.Id,
+		"Name", t.Name,
+	)
 
 	// エンコード後ビデオの転送
 	err = t.postVideo(host, ename)
 	if err != nil {
-		log.WithError(err).Warn("エンコード後ビデオの転送に失敗")
+		log.Warnw("エンコード後ビデオの転送に失敗", "error", err)
 		return
 	}
-	log.WithFields(log.Fields{
-		"Id":   t.Id,
-		"Name": t.Name,
-	}).Info("お仕事完了")
+	log.Infow("お仕事完了", "Id", t.Id, "Name", t.Name)
 	return
 }
 
