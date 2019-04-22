@@ -58,38 +58,38 @@ func main() {
 		parallel = 1
 	}
 	syncc := make(chan struct{}, parallel)
-	waitc := make(chan time.Duration)
 
 	wait := LOOP_WAIT_DEFAULT
 	for {
-		select {
-		case syncc <- struct{}{}: // 並列数を制限
-			// お仕事確認→開始
-			go func() {
+		// 並列数を制限
+		syncc <- struct{}{}
+
+		// お仕事を取得する
+		t, err := getTask(host)
+		if err == nil {
+			log.Infow("お仕事取得成功",
+				"Id", t.Id,
+				"Size", t.Size,
+				"Name", t.Name,
+				"PresetName", t.PresetName,
+				"PresetData", t.PresetData,
+				"Command", t.Command,
+				"Args", t.Args,
+			)
+			go func(t *Task) {
 				defer func() {
+					// 並列数の開放
 					<-syncc
 				}()
-				// お仕事を取得する
-				t, err := getTask(host)
-				if err != nil {
-					log.Infow("お仕事が取得できませんでした", "error", err)
-					return
-				}
-				log.Infow("お仕事取得成功",
-					"Id", t.Id,
-					"Size", t.Size,
-					"Name", t.Name,
-					"PresetName", t.PresetName,
-					"PresetData", t.PresetData,
-					"Command", t.Command,
-					"Args", t.Args,
-				)
-				// 待ち時間初期化
-				waitc <- LOOP_WAIT_DEFAULT
 				// お仕事開始
 				t.procTask(host)
-			}()
-		case wait = <-waitc:
+			}(t)
+			// 待ち時間を初期化
+			wait = LOOP_WAIT_DEFAULT
+		} else {
+			log.Infow("お仕事が取得できませんでした", "error", err)
+			// 並列数の開放
+			<-syncc
 		}
 
 		// 待ち時間
