@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -51,6 +52,10 @@ func main() {
 		os.Exit(1)
 	}
 	host := os.Args[1]
+	base := "."
+	if len(os.Args) >= 3 {
+		base = os.Args[2]
+	}
 
 	// エンコード並列数を決定
 	parallel := runtime.NumCPU() / ENCODING_PARALLEL_CORE
@@ -82,7 +87,7 @@ func main() {
 					<-syncc
 				}()
 				// お仕事開始
-				t.procTask(host)
+				t.procTask(host, base)
 			}(t)
 			// 待ち時間を初期化
 			wait = LOOP_WAIT_DEFAULT
@@ -126,7 +131,7 @@ func getTask(host string) (*Task, error) {
 	return &t, nil
 }
 
-func (t *Task) procTask(host string) {
+func (t *Task) procTask(host, base string) {
 	// プリセットファイルの生成
 	err := t.preset()
 	if err != nil {
@@ -136,7 +141,7 @@ func (t *Task) procTask(host string) {
 	// 作業が終わったらプリセットを消す
 	defer os.Remove(t.PresetName)
 
-	ename := t.Id + ENCODING_EXT
+	ename := filepath.Join(base, t.Id+ENCODING_EXT)
 	// エンコード実行
 	err = t.ffmpeg(ename)
 	if err != nil {
@@ -179,7 +184,8 @@ func (t *Task) postVideo(host, ename string) error {
 		}
 	}
 	{
-		fw, ferr = w.CreateFormFile("videodata", ename)
+		_, file := filepath.Split(ename)
+		fw, ferr = w.CreateFormFile("videodata", file)
 		if ferr != nil {
 			return ferr
 		}
