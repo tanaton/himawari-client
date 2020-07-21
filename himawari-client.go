@@ -143,9 +143,9 @@ func (t *Task) procTask(host, base string) {
 
 	ename := filepath.Join(base, t.Id+ENCODING_EXT)
 	// エンコード実行
-	err = t.ffmpeg(ename)
+	c, err := t.ffmpeg(ename)
 	if err != nil {
-		log.Warnw("ffmpegの実行に失敗", "error", err)
+		log.Warnw("ffmpegの実行に失敗", "error", err, "command", c)
 		return
 	}
 	// 作業が終わったらエンコード済みファイルを消す
@@ -243,11 +243,11 @@ func (t *Task) preset() error {
 	return nil
 }
 
-func (t *Task) ffmpeg(outpath string) error {
+func (t *Task) ffmpeg(outpath string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), COMMAND_TIMEOUT)
 	defer cancel()
 	if t.Command != "ffmpeg" {
-		return errors.New("想定していないコマンド")
+		return "", errors.New("想定していないコマンド")
 	}
 	args := make([]string, len(t.Args), len(t.Args)+1)
 	copy(args, t.Args)
@@ -255,7 +255,7 @@ func (t *Task) ffmpeg(outpath string) error {
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	//cmd.Stdout = os.Stdout
 	//cmd.Stderr = os.Stderr
-	return cmd.Run()
+	return cmd.String(), cmd.Run()
 }
 
 type SizeWriter struct {
