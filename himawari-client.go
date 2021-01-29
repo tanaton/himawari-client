@@ -30,7 +30,6 @@ type Task struct {
 	Id         string
 	Size       int64
 	Name       string
-	PresetName string
 	PresetData string
 	Command    string
 	Args       []string
@@ -52,7 +51,7 @@ func main() {
 		os.Exit(1)
 	}
 	host := os.Args[1]
-	base := "."
+	base := "/tmp"
 	if len(os.Args) >= 3 {
 		base = os.Args[2]
 	}
@@ -76,7 +75,6 @@ func main() {
 				"Id", t.Id,
 				"Size", t.Size,
 				"Name", t.Name,
-				"PresetName", t.PresetName,
 				"PresetData", t.PresetData,
 				"Command", t.Command,
 				"Args", t.Args,
@@ -133,17 +131,17 @@ func getTask(host string) (*Task, error) {
 
 func (t *Task) procTask(host, base string) {
 	// プリセットファイルの生成
-	err := t.preset()
+	ppath, err := t.preset()
 	if err != nil {
-		log.Warnw("presetの生成に失敗", "error", err)
+		log.Warnw("presetの生成に失敗", "error", err, "path", ppath)
 		return
 	}
 	// 作業が終わったらプリセットを消す
-	defer os.Remove(t.PresetName)
+	defer os.Remove(ppath)
 
 	ename := filepath.Join(base, t.Id+ENCODING_EXT)
 	// エンコード実行
-	c, err := t.ffmpeg(ename)
+	c, err := t.ffmpeg(ppath, ename)
 	if err != nil {
 		log.Warnw("ffmpegの実行に失敗", "error", err, "command", c)
 		return
@@ -170,7 +168,10 @@ func (t *Task) postVideo(host, ename string) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(tmpfile.Name()) // clean up
+	defer func() {
+		tmpfile.Close()
+		os.Remove(tmpfile.Name()) // clean up
+	}()
 
 	sw := NewSizeWriter(tmpfile)
 	w := multipart.NewWriter(sw)
@@ -229,21 +230,22 @@ func (t *Task) postVideo(host, ename string) error {
 	return nil
 }
 
-func (t *Task) preset() error {
-	wfp, err := os.Create(t.PresetName)
+func (t *Task) preset() (string, error) {
+	wfp, err := ioutil.TempFile("", "ffmpeg-preset-")
 	if err != nil {
-		return err
+		return "", err
 	}
+	ppath := wfp.Name()
 	_, err = wfp.WriteString(t.PresetData)
 	wfp.Close()
 	if err != nil {
-		os.Remove(t.PresetName)
-		return err
+		os.Remove(ppath)
+		return "", err
 	}
-	return nil
+	return ppath, nil
 }
 
-func (t *Task) ffmpeg(outpath string) (string, error) {
+func (t *Task) ffmpeg(ppath, outpath string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), COMMAND_TIMEOUT)
 	defer cancel()
 	if t.Command != "ffmpeg" {
@@ -251,6 +253,7 @@ func (t *Task) ffmpeg(outpath string) (string, error) {
 	}
 	args := make([]string, len(t.Args), len(t.Args)+1)
 	copy(args, t.Args)
+	args = append(args, "-fpre", ppath)
 	args = append(args, outpath)
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	//cmd.Stdout = os.Stdout
