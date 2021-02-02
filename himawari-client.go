@@ -164,62 +164,37 @@ func (t *Task) procTask(host, base string) {
 }
 
 func (t *Task) postVideo(host, ename string) error {
-	tmpfile, err := ioutil.TempFile("", "videodata-")
-	if err != nil {
-		return err
-	}
-	defer func() {
-		tmpfile.Close()
-		os.Remove(tmpfile.Name()) // clean up
-	}()
+	pr, pw := io.Pipe()
+	w := multipart.NewWriter(pw)
 
-	sw := NewSizeWriter(tmpfile)
-	w := multipart.NewWriter(sw)
-
-	var fw io.Writer
-	var ferr error
-	{
-		ferr = w.WriteField("uuid", t.Id)
-		if ferr != nil {
-			return ferr
+	go func() {
+		defer pw.Close()
+		defer w.Close() // 閉じることでPOSTデータが出来上がる模様
+		err := w.WriteField("uuid", t.Id)
+		if err != nil {
+			log.Warnw("uuidフィールド作成に失敗しました。", "filepath", ename, "error", err)
+			return
 		}
-	}
-	{
 		_, file := filepath.Split(ename)
-		fw, ferr = w.CreateFormFile("videodata", file)
-		if ferr != nil {
-			return ferr
+		fw, err := w.CreateFormFile("videodata", file)
+		if err != nil {
+			log.Warnw("パート作成に失敗しました。", "filepath", ename, "error", err)
+			return
 		}
 		rfp, err := os.Open(ename)
 		if err != nil {
-			return err
+			log.Warnw("動画ファイルオープンに失敗しました。", "filepath", ename, "error", err)
+			return
 		}
+		defer rfp.Close()
 		_, cerr := io.Copy(fw, rfp)
-		rfp.Close()
 		if cerr != nil {
-			return cerr
+			log.Warnw("パイプ書き込みに失敗しました。", "filepath", ename, "error", cerr)
+			return
 		}
-	}
+	}()
 
-	w.Close() // 閉じることでPOSTデータが出来上がる模様
-	_, err = tmpfile.Seek(0, io.SeekStart)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest("POST", "http://"+host+"/task/done", tmpfile)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", w.FormDataContentType())
-	req.ContentLength = sw.size
-	req.Body = tmpfile
-	req.GetBody = func() (io.ReadCloser, error) {
-		// 本当はコピーしないといけない
-		return tmpfile, nil
-	}
-
-	res, err := http.DefaultClient.Do(req)
+	res, err := http.Post("http://"+host+"/task/done", w.FormDataContentType(), pr)
 	if err != nil {
 		return err
 	}
