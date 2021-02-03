@@ -105,7 +105,9 @@ func main() {
 }
 
 func getTask(host string) (*Task, error) {
-	req, err := http.NewRequest("GET", "http://"+host+"/task", nil)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", "http://"+host+"/task", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -194,7 +196,14 @@ func (t *Task) postVideo(host, ename string) error {
 		}
 	}()
 
-	res, err := http.Post("http://"+host+"/task/done", w.FormDataContentType(), pr)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "POST", "http://"+host+"/task/done", pr)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	res, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
