@@ -6,13 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"mime/multipart"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"time"
 
 	"go.uber.org/zap"
@@ -56,6 +57,16 @@ func main() {
 		base = os.Args[2]
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(),
+		syscall.SIGHUP,
+		syscall.SIGINT,
+		syscall.SIGTERM,
+		syscall.SIGQUIT,
+		os.Interrupt,
+		os.Kill,
+	)
+	defer stop()
+
 	// エンコード並列数を決定
 	parallel := runtime.NumCPU() / ENCODING_PARALLEL_CORE
 	if parallel <= 0 {
@@ -64,12 +75,18 @@ func main() {
 	syncc := make(chan struct{}, parallel)
 
 	wait := LOOP_WAIT_DEFAULT
+	sleep := time.NewTimer(wait)
+MAINLOOP:
 	for {
 		// 並列数を制限
-		syncc <- struct{}{}
-
+		select {
+		case syncc <- struct{}{}:
+			log.Debugw("お仕事があるか確認")
+		case <-ctx.Done():
+			break MAINLOOP
+		}
 		// お仕事を取得する
-		t, err := getTask(host)
+		t, err := getTask(ctx, host)
 		if err == nil {
 			log.Infow("お仕事取得成功",
 				"Id", t.Id,
@@ -85,7 +102,7 @@ func main() {
 					<-syncc
 				}()
 				// お仕事開始
-				t.procTask(host, base)
+				t.procTask(ctx, host, base)
 			}(t)
 			// 待ち時間を初期化
 			wait = LOOP_WAIT_DEFAULT
@@ -94,18 +111,25 @@ func main() {
 			// 並列数の開放
 			<-syncc
 		}
-
 		// 待ち時間
-		time.Sleep(wait)
-		wait *= 2
-		if wait > LOOP_WAIT_MAX {
-			wait = LOOP_WAIT_MAX
+		if !sleep.Stop() {
+			<-sleep.C
+		}
+		sleep.Reset(wait)
+		select {
+		case <-sleep.C:
+			wait *= 2
+			if wait > LOOP_WAIT_MAX {
+				wait = LOOP_WAIT_MAX
+			}
+		case <-ctx.Done():
+			break MAINLOOP
 		}
 	}
 }
 
-func getTask(host string) (*Task, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*10)
+func getTask(ctx context.Context, host string) (*Task, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Second*10)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "GET", "http://"+host+"/task", nil)
 	if err != nil {
@@ -131,7 +155,7 @@ func getTask(host string) (*Task, error) {
 	return &t, nil
 }
 
-func (t *Task) procTask(host, base string) {
+func (t *Task) procTask(ctx context.Context, host, base string) {
 	// プリセットファイルの生成
 	ppath, err := t.preset()
 	if err != nil {
@@ -143,7 +167,7 @@ func (t *Task) procTask(host, base string) {
 
 	ename := filepath.Join(base, t.Id+ENCODING_EXT)
 	// エンコード実行
-	c, err := t.ffmpeg(ppath, ename)
+	c, err := t.ffmpeg(ctx, ppath, ename)
 	if err != nil {
 		log.Warnw("ffmpegの実行に失敗", "error", err, "command", c)
 		return
@@ -156,7 +180,7 @@ func (t *Task) procTask(host, base string) {
 	)
 
 	// エンコード後ビデオの転送
-	err = t.postVideo(host, ename)
+	err = t.postVideo(ctx, host, ename)
 	if err != nil {
 		log.Warnw("エンコード後ビデオの転送に失敗", "error", err)
 		return
@@ -165,7 +189,7 @@ func (t *Task) procTask(host, base string) {
 	return
 }
 
-func (t *Task) postVideo(host, ename string) error {
+func (t *Task) postVideo(ctx context.Context, host, ename string) error {
 	pr, pw := io.Pipe()
 	w := multipart.NewWriter(pw)
 
@@ -196,7 +220,7 @@ func (t *Task) postVideo(host, ename string) error {
 		}
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	ctx, cancel := context.WithTimeout(ctx, time.Hour)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, "POST", "http://"+host+"/task/done", pr)
 	if err != nil {
@@ -215,7 +239,7 @@ func (t *Task) postVideo(host, ename string) error {
 }
 
 func (t *Task) preset() (string, error) {
-	wfp, err := ioutil.TempFile("", "ffmpeg-preset-")
+	wfp, err := os.CreateTemp("", "ffmpeg-preset-")
 	if err != nil {
 		return "", err
 	}
@@ -229,8 +253,8 @@ func (t *Task) preset() (string, error) {
 	return ppath, nil
 }
 
-func (t *Task) ffmpeg(ppath, outpath string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), COMMAND_TIMEOUT)
+func (t *Task) ffmpeg(ctx context.Context, ppath, outpath string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, COMMAND_TIMEOUT)
 	defer cancel()
 	if t.Command != "ffmpeg" {
 		return "", errors.New("想定していないコマンド")
